@@ -1,4 +1,9 @@
-import makeWASocket, { useMultiFileAuthState, downloadMediaMessage } from '@whiskeysockets/baileys';
+import makeWASocket, {
+  Browsers,
+  downloadMediaMessage,
+  fetchLatestBaileysVersion,
+  useMultiFileAuthState
+} from '@whiskeysockets/baileys';
 import * as fs from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
@@ -77,8 +82,12 @@ async function processMedia(sock: any, userId: string, msg: any, mediaType: 'ima
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth');
+  const { version } = await fetchLatestBaileysVersion();
   const sock = makeWASocket({
     auth: state,
+    version,
+    browser: Browsers.windows('Chrome'),
+    printQRInTerminal: true,
     generateHighQualityLinkPreview: true
   });
   sock.ev.on('creds.update', saveCreds);
