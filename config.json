@@ -1,5 +1,6 @@
 {
   "askBeforeTransforming": false,
   "maxDuration": 15,
-  "stickerSize": 512
+  "stickerSize": 512,
+  "maxAnimatedStickerKb": 480
 } 

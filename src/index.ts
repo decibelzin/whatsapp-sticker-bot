@@ -15,25 +15,77 @@ const config = JSON.parse(fs.readFileSync('config.json', 'utf8'));
 
 const lastMedia = new Map<string, { msg: any, type: 'image' | 'gif' | 'video' }>();
 
-async function convertToAnimatedWebP(inputPath: string, outputPath: string): Promise<boolean> {
+/** WhatsApp recusa encaminhar figurinhas animadas acima de ~500 KB; usamos margem menor no encode. */
+function maxAnimatedStickerBytes(): number {
+  const kb = typeof config.maxAnimatedStickerKb === 'number' ? config.maxAnimatedStickerKb : 480;
+  return Math.max(64, kb) * 1024;
+}
+
+function runFfmpeg(args: string[]): Promise<boolean> {
   return new Promise((resolve) => {
-    const ffmpegProcess = spawn(ffmpeg!, [
-      '-i', inputPath,
-      '-t', config.maxDuration.toString(),
-      '-vcodec', 'libwebp',
-      '-vf', `scale=${config.stickerSize}:${config.stickerSize}:force_original_aspect_ratio=increase,crop=${config.stickerSize}:${config.stickerSize}`,
-      '-loop', '0',
-      '-an',
-      '-vsync', '0',
-      outputPath
-    ]);
-    ffmpegProcess.on('close', (code) => {
-      resolve(code === 0);
-    });
-    ffmpegProcess.on('error', () => {
-      resolve(false);
-    });
+    const p = spawn(ffmpeg!, args, { stdio: 'ignore' });
+    p.on('close', (code) => resolve(code === 0));
+    p.on('error', () => resolve(false));
   });
+}
+
+async function convertToAnimatedWebP(
+  inputPath: string,
+  outputPath: string,
+  opts: { fps: number; quality: number; durationSec: number; stickerSize: number }
+): Promise<boolean> {
+  const vf = `fps=${opts.fps},scale=${opts.stickerSize}:${opts.stickerSize}:force_original_aspect_ratio=increase,crop=${opts.stickerSize}:${opts.stickerSize}`;
+  return runFfmpeg([
+    '-y',
+    '-i', inputPath,
+    '-t', opts.durationSec.toString(),
+    '-an',
+    '-vf', vf,
+    '-c:v', 'libwebp',
+    '-lossless', '0',
+    '-compression_level', '6',
+    '-quality', opts.quality.toString(),
+    '-loop', '0',
+    outputPath
+  ]);
+}
+
+async function encodeAnimatedStickerUnderLimit(inputPath: string, outputPath: string): Promise<boolean> {
+  const limit = maxAnimatedStickerBytes();
+  const size = config.stickerSize;
+  const maxDur = config.maxDuration;
+  const tiers: { fps: number; quality: number; durationSec: number }[] = [
+    { fps: 12, quality: 52, durationSec: maxDur },
+    { fps: 10, quality: 44, durationSec: maxDur },
+    { fps: 8, quality: 36, durationSec: maxDur },
+    { fps: 6, quality: 30, durationSec: maxDur },
+    { fps: 5, quality: 26, durationSec: Math.min(maxDur, 10) },
+    { fps: 5, quality: 22, durationSec: Math.min(maxDur, 6) },
+    { fps: 4, quality: 18, durationSec: Math.min(maxDur, 4) }
+  ];
+
+  for (const tier of tiers) {
+    if (fs.existsSync(outputPath)) {
+      try {
+        fs.unlinkSync(outputPath);
+      } catch {
+        /* ignore */
+      }
+    }
+    const ok = await convertToAnimatedWebP(inputPath, outputPath, { ...tier, stickerSize: size });
+    if (ok && fs.existsSync(outputPath)) {
+      const bytes = fs.statSync(outputPath).size;
+      if (bytes <= limit) return true;
+    }
+  }
+  if (fs.existsSync(outputPath)) {
+    try {
+      fs.unlinkSync(outputPath);
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
 }
 
 async function processMedia(sock: any, userId: string, msg: any, mediaType: 'image' | 'gif' | 'video') {
@@ -64,13 +116,15 @@ async function processMedia(sock: any, userId: string, msg: any, mediaType: 'ima
       const inputFileName = path.join(tempPath, `${Date.now()}.mp4`);
       fs.writeFileSync(inputFileName, buffer);
       const outputFileName = path.join(tempPath, `${Date.now()}_sticker.webp`);
-      const success = await convertToAnimatedWebP(inputFileName, outputFileName);
+      const success = await encodeAnimatedStickerUnderLimit(inputFileName, outputFileName);
       if (success && fs.existsSync(outputFileName)) {
         const stickerBuffer = fs.readFileSync(outputFileName);
         await sock.sendMessage(userId, { sticker: stickerBuffer }, { quoted: msg });
         fs.unlinkSync(outputFileName);
       } else {
-        await sock.sendMessage(userId, { text: '❌ Erro ao converter para figurinha animada.' }, { quoted: msg });
+        await sock.sendMessage(userId, {
+          text: '❌ Não deu para gerar uma figurinha animada dentro do limite do WhatsApp (~500 KB). Envie um vídeo/GIF mais curto ou com menos detalhes.'
+        }, { quoted: msg });
       }
       fs.unlinkSync(inputFileName);
     }
